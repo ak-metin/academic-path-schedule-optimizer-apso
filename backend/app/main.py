@@ -10,7 +10,7 @@ Adım 1 kapsamında:
 
 import logging
 from contextlib import asynccontextmanager
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,7 @@ from app.database import Base, SessionLocal, engine, get_db
 from app.engines.dag_engine import CurriculumCycleError, CurriculumGraphEngine
 from app.engines.exam_proctor_csp import ExamProctorAllocationEngine
 from app.engines.weekly_csp import WeeklyCourseSchedulingEngine
+from app.services.export_service import ExportService
 from app.models.academic import (
     Course,
     CoursePrerequisite,
@@ -398,5 +399,54 @@ def get_exam_seating_plan(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"message": str(exc)},
         ) from exc
+
+
+# ==============================================================================
+# EXCEL (.xlsx) VE PDF (.pdf) RAPOR DIŞA AKTARIM UÇ NOKTALARI
+# ==============================================================================
+
+@app.get(
+    "/api/v1/export/weekly.xlsx",
+    tags=["Export & Reports (Excel / PDF)"],
+)
+def download_weekly_schedule_excel(
+    academic_term: str = Query(default="2026-FALL", description="Akademik dönem"),
+    db: Session = Depends(get_db),
+):
+    """Haftalık ders programını resmi Excel (.xlsx) çalışma kitabı olarak indirir."""
+    exporter = ExportService(db)
+    xlsx_bytes = exporter.export_weekly_schedule_xlsx(academic_term=academic_term)
+    filename = f"APSO_Weekly_Schedule_{academic_term}.xlsx"
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get(
+    "/api/v1/export/exams.pdf",
+    tags=["Export & Reports (Excel / PDF)"],
+)
+def download_exam_and_seating_pdf(
+    academic_term: str = Query(default="2026-FALL", description="Akademik dönem"),
+    exam_type: str = Query(default="FINAL", pattern="^(MIDTERM|FINAL)$"),
+    db: Session = Depends(get_db),
+):
+    """
+    Sınav takvimini, 1-boş-koltuk salon bölünmesini, Minimax Arş. Gör. gözetmen
+    listesini ve KVKK uyumlu kapı oturma planını resmi PDF (.pdf) olarak indirir.
+    """
+    exporter = ExportService(db)
+    pdf_bytes = exporter.export_exam_and_seating_pdf(
+        academic_term=academic_term, exam_type=exam_type
+    )
+    filename = f"APSO_Exam_Seating_Proctors_{academic_term}_{exam_type}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 
