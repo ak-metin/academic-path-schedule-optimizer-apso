@@ -3,6 +3,7 @@ import {
   API_BASE_URL,
   CourseGraphNodeMetric,
   CurriculumGraphAnalysisResponse,
+  ExcelImportResultResponse,
   FailureSimulationResponse,
 } from "../api";
 
@@ -21,6 +22,42 @@ export const CurriculumDAGPage: React.FC = () => {
     type: "error" | "success";
     text: string;
   } | null>(null);
+  const [importResult, setImportResult] =
+    useState<ExcelImportResultResponse | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+
+  const handleExcelUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportResult(null);
+    setImportError(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const b64 = window.btoa(binary);
+      const res = await fetch(`${API_BASE_URL}/import/excel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: file.name,
+          content_base64: b64,
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        setImportError(body?.detail?.message || "Excel yükleme hatası.");
+      } else {
+        setImportResult(body);
+        fetchGraph();
+      }
+    } catch (err) {
+      setImportError(String(err));
+    }
+  };
 
   const fetchGraph = async () => {
     const res = await fetch(`${API_BASE_URL}/curriculum/graph`);
@@ -281,6 +318,48 @@ export const CurriculumDAGPage: React.FC = () => {
               {edgeStatusMsg.text}
             </div>
           )}
+
+          {/* Excel (.xlsx) Veri İçe Aktarma (Pydantic v2 Doğrulamalı) */}
+          <div className="pt-3 border-t border-slate-200 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-900">
+                Excel (.xlsx) Veri İçe Aktar (Pydantic v2)
+              </span>
+              <a
+                href={`${API_BASE_URL}/import/template.xlsx`}
+                className="text-[11px] font-semibold text-blue-700 hover:underline"
+              >
+                Şablon (.xlsx) İndir
+              </a>
+            </div>
+            <input
+              type="file"
+              accept=".xlsx"
+              onChange={handleExcelUpload}
+              className="block w-full text-xs text-slate-600 file:mr-2 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-800 hover:file:bg-slate-200"
+            />
+            {importError && (
+              <div className="p-2 rounded bg-red-50 text-red-800 text-xs">
+                {importError}
+              </div>
+            )}
+            {importResult && (
+              <div className="p-2 rounded bg-emerald-50 text-emerald-900 text-xs space-y-1">
+                <div className="font-bold">
+                  Excel Yüklendi ({importResult.filename}): +
+                  {importResult.courses_created} Yeni Ders, +
+                  {importResult.rooms_created} Yeni Amfi (Hata:{" "}
+                  {importResult.total_errors})
+                </div>
+                {importResult.row_errors.map((err, i) => (
+                  <div key={i} className="text-[11px] text-red-700">
+                    • [{err.sheet_name} Satır {err.row_number} -{" "}
+                    {err.identifier}]: {err.error_message_tr}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

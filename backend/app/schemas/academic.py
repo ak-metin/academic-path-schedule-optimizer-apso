@@ -353,3 +353,55 @@ class RoomSeatingGridResponse(BaseModel):
     seats: list[SeatCellItem]
 
 
+# ==============================================================================
+# EXCEL / CSV VERİ İÇE AKTARMA (IMPORT & PYDANTIC V2 DOĞRULAMA) ŞEMALARI
+# ==============================================================================
+
+class CourseImportRowSchema(BaseModel):
+    """Excel/CSV üzerinden yüklenen her bir ders satırının Pydantic v2 doğrulama şeması."""
+
+    code: str = Field(..., min_length=3, max_length=24)
+    name: str = Field(..., min_length=2, max_length=160)
+    semester: int = Field(..., ge=1, le=8)
+    ects: int = Field(..., gt=0, le=30)
+    theory_hours: int = Field(default=3, ge=0, le=10)
+    lab_hours: int = Field(default=0, ge=0, le=10)
+    is_mandatory: bool = Field(default=True)
+    requires_lab_room: bool = Field(default=False)
+    enrolled_count: int = Field(default=40, ge=1, le=500)
+    instructor_code: str | None = Field(default=None, max_length=32)
+
+
+class RoomImportRowSchema(BaseModel):
+    """Excel/CSV üzerinden yüklenen her bir amfi/laboratuvar satırının Pydantic v2 doğrulama şeması."""
+
+    code: str = Field(..., min_length=2, max_length=32)
+    name: str = Field(..., min_length=2, max_length=120)
+    room_type: str = Field(default="LECTURE", pattern="^(LECTURE|LAB)$")
+    normal_capacity: int = Field(..., gt=0, le=1000)
+    seat_rows: int = Field(..., gt=0, le=100)
+    seat_cols: int = Field(..., gt=0, le=100)
+
+
+class ExcelImportRowError(BaseModel):
+    """Excel/CSV yüklemesinde doğrulamadan geçemeyen satırın hata detayı."""
+
+    sheet_name: str
+    row_number: int
+    identifier: str
+    error_message_tr: str
+
+
+class ExcelImportResultResponse(BaseModel):
+    """Excel/CSV veri içe aktarma işleminin satır bazlı doğrulama ve kayıt özeti."""
+
+    filename: str
+    courses_created: int
+    courses_updated: int
+    rooms_created: int
+    rooms_updated: int
+    total_errors: int
+    row_errors: list[ExcelImportRowError]
+
+
+

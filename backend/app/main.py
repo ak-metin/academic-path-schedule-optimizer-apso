@@ -8,8 +8,10 @@ Adım 1 kapsamında:
 - Temel veri doğrulama ve envanter sorgulama REST API uç noktaları sunulmaktadır.
 """
 
+import base64
 import logging
 from contextlib import asynccontextmanager
+from pydantic import BaseModel, Field
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -20,6 +22,7 @@ from app.engines.dag_engine import CurriculumCycleError, CurriculumGraphEngine
 from app.engines.exam_proctor_csp import ExamProctorAllocationEngine
 from app.engines.weekly_csp import WeeklyCourseSchedulingEngine
 from app.services.export_service import ExportService
+from app.services.import_service import ExcelImportService
 from app.models.academic import (
     Course,
     CoursePrerequisite,
@@ -35,6 +38,7 @@ from app.schemas.academic import (
     CurriculumGraphAnalysisResponse,
     ExamScheduleGenerateRequest,
     ExamScheduleOptimizationResponse,
+    ExcelImportResultResponse,
     FailureSimulationRequest,
     FailureSimulationResponse,
     InstructorRead,
@@ -447,6 +451,65 @@ def download_exam_and_seating_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ==============================================================================
+# EXCEL (.xlsx) VERİ İÇE AKTARMA (IMPORT & PYDANTIC V2 DOĞRULAMA) UÇ NOKTALARI
+# ==============================================================================
+
+class ExcelBase64UploadRequest(BaseModel):
+    """Yüklenen Excel (.xlsx) dosyasının Base64 kodlu JSON taşıyıcısı."""
+
+    filename: str = Field(default="department_data.xlsx", min_length=3, max_length=120)
+    content_base64: str = Field(..., min_length=8, description="Base64 kodlanmış .xlsx dosya içeriği")
+
+
+@app.get(
+    "/api/v1/import/template.xlsx",
+    tags=["Import & Validation (Excel)"],
+)
+def download_import_template_excel(db: Session = Depends(get_db)):
+    """Bölüm ders ve amfi/laboratuvar yükleme şablonunu (.xlsx) indirir."""
+    importer = ExcelImportService(db)
+    tpl_bytes = importer.generate_import_template_xlsx()
+    return Response(
+        content=tpl_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="APSO_Import_Template.xlsx"'},
+    )
+
+
+@app.post(
+    "/api/v1/import/excel",
+    response_model=ExcelImportResultResponse,
+    tags=["Import & Validation (Excel)"],
+)
+def import_excel_dataset(
+    payload: ExcelBase64UploadRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Base64 olarak gönderilen Excel (.xlsx) dosyasındaki Courses ve Rooms sayfalarını
+    okur, her satırı Pydantic v2 şema doğrulamasından geçirir ve hatalı satırları
+    numarasıyla birlikte Türkçe raporlar.
+    """
+    try:
+        raw_bytes = base64.b64decode(payload.content_base64)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": f"Base64 çözme hatası: {exc}"},
+        ) from exc
+
+    importer = ExcelImportService(db)
+    try:
+        return importer.import_excel_workbook(raw_bytes, filename=payload.filename)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"message": str(exc)},
+        ) from exc
+
 
 
 

@@ -170,3 +170,21 @@ export interface RoomSeatingGridResponse {
   one_empty_seat_verified: boolean;
   seats: SeatCellItem[];
 }
+
+export interface ExcelImportRowError {
+  sheet_name: string;
+  row_number: number;
+  identifier: string;
+  error_message_tr: string;
+}
+
+export interface ExcelImportResultResponse {
+  filename: string;
+  courses_created: number;
+  courses_updated: number;
+  rooms_created: number;
+  rooms_updated: number;
+  total_errors: number;
+  row_errors: ExcelImportRowError[];
+}
+
