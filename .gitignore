@@ -16,9 +16,12 @@ build/
 # Environment & Secrets
 .env
 .env.local
+*.db
+*.sqlite3
 
 # OS / Editor
 .DS_Store
 Thumbs.db
 ~$*.docx
 *.tmp
+

@@ -52,3 +52,4 @@ git clone https://github.com/ak-metin/academic-path-schedule-optimizer-apso.git
 cd academic-path-schedule-optimizer-apso
 docker compose up --build
 ```
+
