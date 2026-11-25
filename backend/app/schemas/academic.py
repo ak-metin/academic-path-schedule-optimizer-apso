@@ -204,6 +204,19 @@ class NonConflictMatrixResponse(BaseModel):
 # MODÜL 2 (Weekly Course Scheduling Engine — Google OR-Tools CP-SAT) Şemaları
 # ==============================================================================
 
+class PinnedSlotItem(BaseModel):
+    """
+    Stretch Goal 1 (What-If & Pin/Lock): Koordinatörün belirli bir (ders, oturum tipi,
+    amfi, gün, saat) atamasını sabitleyerek CP-SAT çözücüsüne kesin kısıt olarak vermesi.
+    """
+
+    course_id: int
+    room_id: int
+    day_of_week: int = Field(..., ge=1, le=5)
+    slot_index: int = Field(..., ge=1, le=8)
+    session_type: str = Field(default="THEORY", pattern="^(THEORY|LAB)$")
+
+
 class WeeklyScheduleGenerateRequest(BaseModel):
     """Haftalık ders programı optimizasyon isteği."""
 
@@ -216,6 +229,50 @@ class WeeklyScheduleGenerateRequest(BaseModel):
     max_time_seconds: int = Field(default=20, ge=2, le=120, description="CP-SAT çözücü zaman aşımı sınırı (sn)")
     idle_gap_weight: int = Field(default=10, ge=0, le=100, description="Öğrenci günlük boş saat (idle gap) ceza ağırlığı")
     instructor_preference_weight: int = Field(default=5, ge=0, le=100, description="Hoca saat tercihi ceza ağırlığı")
+    enforce_contiguous_blocks: bool = Field(
+        default=True,
+        description="Aynı gün içindeki 2 saatlik ders/lab oturumlarının peş peşe (blok ders) ve aynı salonda olmasını zorunlu kılar",
+    )
+    split_theory_and_lab_sessions: bool = Field(
+        default=True,
+        description="Hem teorik hem laboratuvar saati olan dersleri THEORY (Amfi) ve LAB (Bilgisayar Labı) blokları olarak ayrı ayrı zamanlar",
+    )
+    pinned_slots: list[PinnedSlotItem] = Field(
+        default_factory=list,
+        description="Sabitlenen (kilitlenen) ders-oda-gün-saat hücreleri; CP-SAT bu hücreleri koruyarak kalan programı optimize eder",
+    )
+
+
+class WeeklySlotMoveRequest(BaseModel):
+    """
+    Stretch Goal 1 — Manuel What-If Ders Taşıma ve Anlık Çakışma Doğrulayıcı İsteği:
+    Mevcut bir ders oturumunu (from_day, from_slot, from_room_id) hedef (to_day, to_slot, to_room_id)
+    hücresine taşırken tüm Hard Constraint'leri ve C_DAG kurallarını anında denetler.
+    """
+
+    academic_term: str = Field(default="2026-FALL")
+    course_id: int
+    session_type: str = Field(default="THEORY", pattern="^(THEORY|LAB)$")
+    from_day: int = Field(..., ge=1, le=5)
+    from_slot: int = Field(..., ge=1, le=8)
+    from_room_id: int
+    to_day: int = Field(..., ge=1, le=5)
+    to_slot: int = Field(..., ge=1, le=8)
+    to_room_id: int
+    apply_if_valid: bool = Field(
+        default=True,
+        description="True ise ve hiçbir kesin kısıt ihlali yoksa değişikliği veritabanına kaydeder",
+    )
+
+
+class WeeklySlotMoveResponse(BaseModel):
+    """What-If manuel ders taşıma doğrulama ve uygulama sonucu."""
+
+    is_valid: bool
+    applied: bool
+    violations_tr: list[str]
+    warnings_tr: list[str]
+    updated_assignment: "WeeklySlotAssignmentRead | None" = None
 
 
 class WeeklySlotAssignmentRead(BaseModel):
@@ -245,6 +302,9 @@ class WeeklyScheduleOptimizationResponse(BaseModel):
     solve_time_seconds: float
     total_courses_scheduled: int
     total_slot_assignments: int
+    theory_slot_assignments: int = 0
+    lab_slot_assignments: int = 0
+    contiguous_blocks_verified: bool = True
     hard_constraints_satisfied: bool
     c_dag_pairs_enforced: int
     total_student_idle_gap_hours: int
@@ -340,8 +400,24 @@ class SeatCellItem(BaseModel):
     seat_col: int
 
 
+class VisualRoomLayoutItem(BaseModel):
+    """Görsel 2B Sinema/Amfi Koltuk Haritası için salonun fiziksel boyutları ve gözetmen bilgisi."""
+
+    room_id: int
+    room_code: str
+    room_name: str
+    room_type: str
+    seat_rows: int
+    seat_cols: int
+    normal_capacity: int
+    effective_exam_capacity: int
+    allocated_student_count: int
+    proctor_ta_code: str
+    proctor_ta_name: str
+
+
 class RoomSeatingGridResponse(BaseModel):
-    """Bir sınav oturumunun tüm salonlarındaki 1-boş-koltuk 2B oturma matrisi."""
+    """Bir sınav oturumunun tüm salonlarındaki 1-boş-koltuk 2B oturma matrisi ve salon ızgara boyutları."""
 
     exam_session_id: int
     course_code: str
@@ -350,6 +426,7 @@ class RoomSeatingGridResponse(BaseModel):
     session_index: int
     total_seated_students: int
     one_empty_seat_verified: bool
+    rooms: list[VisualRoomLayoutItem] = Field(default_factory=list)
     seats: list[SeatCellItem]
 
 
@@ -402,6 +479,69 @@ class ExcelImportResultResponse(BaseModel):
     rooms_updated: int
     total_errors: int
     row_errors: list[ExcelImportRowError]
+
+
+# ==============================================================================
+# GELİŞTİRME 1: İnteraktif Kaynak & Hoca / Arş. Gör. Müsaitlik Yönetimi Şemaları
+# ==============================================================================
+
+class InstructorAvailabilitySlotSchema(BaseModel):
+    """Öğretim elemanının tek bir (gün, saat dilimi) müsaitlik ve tercih cezası hücresi."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    day_of_week: int = Field(..., ge=1, le=5, description="1=Pazartesi .. 5=Cuma")
+    slot_index: int = Field(..., ge=1, le=8, description="1..8 ders saati dilimi")
+    is_available: bool = Field(default=True, description="False ise kesin kısıt (Hard Constraint) olarak kapatılır")
+    preference_penalty: int = Field(default=0, ge=0, le=10, description="0=İstenen, 2=Az İstenen, 5=İstenmeyen saat")
+
+
+class InstructorAvailabilityUpdateRequest(BaseModel):
+    """Bir öğretim elemanının haftalık 5x8 müsaitlik hücrelerini toplu veya kısmi güncelleme şeması."""
+
+    slots: list[InstructorAvailabilitySlotSchema] = Field(..., min_length=1)
+
+
+class CourseConstraintUpdateRequest(BaseModel):
+    """Bir dersin öğrenci mevcudu, LAB gereksinimi ve sorumlu öğretim elemanını güncelleme şeması."""
+
+    enrolled_count: int = Field(..., ge=1, le=600)
+    requires_lab_room: bool
+    theory_hours: int = Field(..., ge=1, le=8)
+    lab_hours: int = Field(default=0, ge=0, le=6)
+    instructor_id: int | None = None
+
+
+class RoomCapacityUpdateRequest(BaseModel):
+    """Bir amfi veya laboratuvarın satır x sütun koltuk matrisi ve normal kapasitesini güncelleme şeması."""
+
+    room_type: str = Field(..., pattern="^(LECTURE|LAB)$")
+    normal_capacity: int = Field(..., gt=0, le=1000)
+    seat_rows: int = Field(..., gt=0, le=100)
+    seat_cols: int = Field(..., gt=0, le=100)
+
+
+class TAUnavailabilityRead(BaseModel):
+    """Araştırma görevlisi sınav haftası müsait olmama (yüksek lisans dersi vb.) kaydı."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    ta_id: int
+    ta_code: str
+    ta_name: str
+    exam_day: int
+    session_index: int
+    reason: str
+
+
+class TAUnavailabilityCreateRequest(BaseModel):
+    """Araştırma görevlisine yeni bir sınav oturumu kısıtı (lisansüstü ders saati) ekleme şeması."""
+
+    exam_day: int = Field(..., ge=1, le=15)
+    session_index: int = Field(..., ge=1, le=6)
+    reason: str = Field(default="MSc/PhD Graduate Course", min_length=2, max_length=160)
+
 
 
 

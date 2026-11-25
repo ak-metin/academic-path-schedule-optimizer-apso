@@ -126,6 +126,20 @@ def test_module2_weekly_schedule_hard_and_soft_constraints(client):
     # 5. dönem düzensiz öğrencilerin birlikte aldığı CSE201 ve SE301 aynı (gün, slot) içinde olamaz!
     assert course_slots_map["CSE201"].isdisjoint(course_slots_map["SE301"])
 
+    # 6. Geliştirme 3 — Ayrı Teori (THEORY) + Lab (LAB) ve Blok Ders (Ardışık Saat) Doğrulaması:
+    # CSE201 dersi (3T + 2L, requires_lab_room=True) 3 saat THEORY ve 2 saat LAB olarak zamanlanmalı!
+    cse201_assigns = [a for a in assignments if a["course_code"] == "CSE201"]
+    cse201_theory = [a for a in cse201_assigns if a["session_type"] == "THEORY"]
+    cse201_lab = [a for a in cse201_assigns if a["session_type"] == "LAB"]
+    assert len(cse201_theory) == 3
+    assert len(cse201_lab) == 2
+    assert all(a["room_type"] == "LAB" for a in cse201_lab)
+
+    # 2 saatlik LAB oturumunun aynı günde, aynı LAB odasında ve peş peşe (|s2 - s1| == 1) olduğunu doğrula
+    assert cse201_lab[0]["day_of_week"] == cse201_lab[1]["day_of_week"]
+    assert cse201_lab[0]["room_id"] == cse201_lab[1]["room_id"]
+    assert abs(cse201_lab[1]["slot_index"] - cse201_lab[0]["slot_index"]) == 1
+
 
 def test_module2_unsat_core_diagnostics_when_overconstrained(client, db_session):
     """
@@ -213,6 +227,8 @@ def test_module3_exam_seating_1_empty_seat_and_minimax_proctors(client, db_sessi
     seating_grid = seating_res.json()
     assert seating_grid["one_empty_seat_verified"] is True
     assert seating_grid["total_seated_students"] == 30  # 20 düzenli 1. sınıf + 10 alttan alan 3. sınıf öğrencisi
+    assert len(seating_grid["rooms"]) >= 2  # Görsel 2B harita için salon matris boyutları gelmeli
+    assert all(rm["seat_rows"] > 0 and rm["seat_cols"] > 0 for rm in seating_grid["rooms"])
     # Tüm koltuk sütun indekslerinin tek sayı (1, 3, 5, ...) olduğunu doğrula
     for seat in seating_grid["seats"]:
         assert seat["seat_col"] % 2 == 1

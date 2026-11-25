@@ -51,6 +51,7 @@ from app.schemas.academic import (
     ProctorWorkloadSummaryItem,
     RoomSeatingGridResponse,
     SeatCellItem,
+    VisualRoomLayoutItem,
 )
 
 
@@ -153,144 +154,109 @@ class ExamProctorAllocationEngine:
         ta_blocked_set = {(u.ta_id, u.exam_day, u.session_index) for u in ta_unavails}
 
         # ======================================================================
-        # CP-SAT MODELİ: Sınav Oturumu, Çoklu Amfi Bölme ve Minimax Gözetmen Ataması
+        # İKİ AŞAMALI (DECOMPOSED) CP-SAT MİMARİSİ (Çok Hızlı & %100 Deterministik):
+        # Aşama A: Öğrenci Sınav Çakışmasızlığı + 1-Boş-Koltuk Çoklu Amfi Bölme CSP
+        # Aşama B: Seçilen Aktif Sınav Salonlarına Minimax (L_max - L_min) Gözetmen CSP
         # ======================================================================
-        model = cp_model.CpModel()
+        model_a = cp_model.CpModel()
 
         # E[c_id, d, s] in {0, 1}: Ders c'nin sınavı d. gün s. oturumda mı?
         e_vars: dict[tuple[int, int, int], cp_model.IntVar] = {}
         # Y[c_id, r_id, d, s] in {0, 1}: Ders c'nin sınavı (d, s) oturumunda r amfisini kullanıyor mu?
         y_vars: dict[tuple[int, int, int, int], cp_model.IntVar] = {}
-        # Z[ta_id, c_id, r_id, d, s] in {0, 1}: Arş. Gör. ta, (d, s) oturumunda c sınavının r amfisine gözetmen mi?
-        z_vars: dict[tuple[int, int, int, int, int], cp_model.IntVar] = {}
 
         for c in courses:
             c_session_vars = []
             for d, s in all_time_slots:
-                e_var = model.NewBoolVar(f"e_c{c.id}_d{d}_s{s}")
+                # Oturumda müsait olan toplam Arş. Gör. sayısı kontrolü
+                avail_ta_count = sum(1 for ta in tas if (ta.id, d, s) not in ta_blocked_set)
+                if avail_ta_count == 0:
+                    continue
+
+                e_var = model_a.NewBoolVar(f"e_c{c.id}_d{d}_s{s}")
                 e_vars[(c.id, d, s)] = e_var
                 c_session_vars.append(e_var)
 
                 room_vars_at_slot = []
                 for r in rooms:
-                    y_var = model.NewBoolVar(f"y_c{c.id}_r{r.id}_d{d}_s{s}")
+                    y_var = model_a.NewBoolVar(f"y_c{c.id}_r{r.id}_d{d}_s{s}")
                     y_vars[(c.id, r.id, d, s)] = y_var
                     room_vars_at_slot.append(y_var)
-                    # Bir amfi ancak sınav o oturumdaysa kullanılabilir
-                    model.Add(y_var <= e_var)
-
-                    # Bu amfiye atanabilecek müsait Arş. Gör. değişkenleri
-                    avail_ta_vars = []
-                    for ta in tas:
-                        if (ta.id, d, s) in ta_blocked_set:
-                            continue
-                        z_var = model.NewBoolVar(f"z_ta{ta.id}_c{c.id}_r{r.id}_d{d}_s{s}")
-                        z_vars[(ta.id, c.id, r.id, d, s)] = z_var
-                        avail_ta_vars.append(z_var)
-
-                    # Eğer y_var == 1 ise (bu amfide sınav yapılıyorsa), tam 1 gözetmen (Arş. Gör.) atanmalıdır
-                    if avail_ta_vars:
-                        model.Add(sum(avail_ta_vars) == y_var)
-                    else:
-                        model.Add(y_var == 0)
+                    model_a.Add(y_var <= e_var)
 
                 # HARD CONSTRAINT (1-Boş-Koltuk Efektif Sınav Kapasitesi):
                 # Seçilen amfilerin effective_exam_capacity toplamı >= dersin öğrenci sayısı (enrolled_count)
-                model.Add(
+                model_a.Add(
                     sum(r.effective_exam_capacity * y_vars[(c.id, r.id, d, s)] for r in rooms)
                     >= c.enrolled_count * e_var
                 )
-                # Gereksiz yere fazladan salon açılmasını önlemek için üst sınır (en fazla 3 amfiye bölünsün)
-                model.Add(sum(room_vars_at_slot) <= 3 * e_var)
+                model_a.Add(sum(room_vars_at_slot) <= min(3, avail_ta_count) * e_var)
 
             # HARD CONSTRAINT: Her dersin tam 1 sınav oturumu olmalıdır
-            model.Add(sum(c_session_vars) == 1)
+            model_a.Add(sum(c_session_vars) == 1)
 
         # HARD CONSTRAINT (Öğrenci Sınav Çakışması — 0 Tolerans):
         # Ortak öğrencisi olan iki dersin sınavı aynı (d, s) oturumuna atanamaz!
         for c_a_id, c_b_id in conflict_course_pairs:
             for d, s in all_time_slots:
-                model.Add(e_vars[(c_a_id, d, s)] + e_vars[(c_b_id, d, s)] <= 1)
+                va = e_vars.get((c_a_id, d, s))
+                vb = e_vars.get((c_b_id, d, s))
+                if va is not None and vb is not None:
+                    model_a.Add(va + vb <= 1)
 
         # HARD CONSTRAINT (Aynı Dönem Öğrencileri İçin Günde En Fazla 1 Sınav / Yoğunluk Sınırı):
         courses_by_sem: dict[int, list[Course]] = defaultdict(list)
         for c in courses:
             courses_by_sem[c.semester].append(c)
         for sem, sem_courses in courses_by_sem.items():
+            # Eğer sınav günü sayısı dönemdeki ders sayısından azsa günde en fazla 2 sınava izin ver, değilse 1
+            max_per_day = 1 if len(exam_days) >= len(sem_courses) else 2
             for d in exam_days:
                 day_sem_exams = [
                     e_vars[(c.id, d, s)]
                     for c in sem_courses
                     for s in sessions
+                    if (c.id, d, s) in e_vars
                 ]
-                model.Add(sum(day_sem_exams) <= 1)
+                if day_sem_exams:
+                    model_a.Add(sum(day_sem_exams) <= max_per_day)
 
-        # HARD CONSTRAINT (Amfi Çakışmazlığı): Aynı oturumda bir amfide en fazla 1 sınav yapılabilir
-        for r in rooms:
-            for d, s in all_time_slots:
-                model.Add(sum(y_vars[(c.id, r.id, d, s)] for c in courses) <= 1)
-
-        # HARD CONSTRAINT (Gözetmen / Arş. Gör. Çakışmazlığı):
-        # Bir Arş. Gör. aynı (d, s) oturumunda en fazla 1 amfide gözetmen olabilir
-        for ta in tas:
-            for d, s in all_time_slots:
-                ta_slot_vars = [
-                    z_vars[(ta.id, c.id, r.id, d, s)]
+        # HARD CONSTRAINT (Amfi Çakışmazlığı ve Oturum Başına Gözetmen Yeterliliği):
+        for d, s in all_time_slots:
+            avail_ta_count = sum(1 for ta in tas if (ta.id, d, s) not in ta_blocked_set)
+            slot_all_room_vars = []
+            for r in rooms:
+                r_slot_vars = [
+                    y_vars[(c.id, r.id, d, s)]
                     for c in courses
-                    for r in rooms
-                    if (ta.id, c.id, r.id, d, s) in z_vars
+                    if (c.id, r.id, d, s) in y_vars
                 ]
-                if len(ta_slot_vars) > 1:
-                    model.Add(sum(ta_slot_vars) <= 1)
+                if r_slot_vars:
+                    model_a.Add(sum(r_slot_vars) <= 1)
+                    slot_all_room_vars.extend(r_slot_vars)
+            # Aynı oturumda açılan toplam sınav salonu sayısı, o oturumdaki müsait Arş. Gör. sayısını aşamaz!
+            if slot_all_room_vars:
+                model_a.Add(sum(slot_all_room_vars) <= avail_ta_count)
 
-        # ======================================================================
-        # MINIMAX GÖZETMEN ADALET KRİTERİ: min (L_max - L_min) + Salon Sayısı Minimizasyonu
-        # Not: Tam sayı CP-SAT aritmetiği için ağırlıklar 2 ile ölçeklenir:
-        # Normal oturum (1.0 -> 2 puan), Akşam oturumu (s == req.sessions_per_day -> 1.5 -> 3 puan)
-        # ======================================================================
-        max_possible_scaled_load = len(courses) * 3 * 3
-        l_max = model.NewIntVar(0, max_possible_scaled_load, "L_max_scaled")
-        l_min = model.NewIntVar(0, max_possible_scaled_load, "L_min_scaled")
-        ta_scaled_loads: dict[int, cp_model.IntVar] = {}
+        # Aşama A Hedefi: Toplam açılan sınav salonu sayısını ve akşam/hafta sonu oturumlarını minimize et
+        heavy_session_penalties = [
+            2 * var
+            for (c_id, d, s), var in e_vars.items()
+            if (s == req.sessions_per_day) or (d in (6, 7))
+        ]
+        model_a.Minimize(10 * sum(y_vars.values()) + sum(heavy_session_penalties))
 
-        for ta in tas:
-            load_var = model.NewIntVar(0, max_possible_scaled_load, f"load_ta{ta.id}")
-            ta_scaled_loads[ta.id] = load_var
-            weighted_terms = []
-            for c in courses:
-                for r in rooms:
-                    for d, s in all_time_slots:
-                        zv = z_vars.get((ta.id, c.id, r.id, d, s))
-                        if zv is not None:
-                            # Son oturum (akşam) veya 6./7. gün (hafta sonu) ise ağırlık 1.5 (ölçekli 3), değilse 1.0 (ölçekli 2)
-                            is_heavy = (s == req.sessions_per_day) or (d in (6, 7))
-                            w_scaled = 3 if is_heavy else 2
-                            weighted_terms.append(w_scaled * zv)
-            if weighted_terms:
-                model.Add(load_var == sum(weighted_terms))
-            else:
-                model.Add(load_var == 0)
+        solver_a = cp_model.CpSolver()
+        solver_a.parameters.max_time_in_seconds = max(2.0, float(req.max_time_seconds) * 0.6)
+        solver_a.parameters.num_search_workers = settings.cpsat_num_search_workers
+        status_a = solver_a.Solve(model_a)
 
-            model.Add(l_max >= load_var)
-            model.Add(l_min <= load_var)
-
-        # Toplam açılan amfi sayısı (gereksiz bölünmeyi engellemek için ikincil hedef)
-        total_rooms_used_expr = sum(y_vars.values())
-
-        # Birincil hedef: Minimax gözetmen yük farkı (L_max - L_min), İkincil hedef: kullanılan salon sayısı
-        model.Minimize(50 * (l_max - l_min) + total_rooms_used_expr)
-
-        solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = float(req.max_time_seconds)
-        solver.parameters.num_search_workers = settings.cpsat_num_search_workers
-        status = solver.Solve(model)
-        elapsed_sec = round(time.perf_counter() - start_ts, 4)
-
-        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE) or unsat_diagnostics:
+        if status_a not in (cp_model.OPTIMAL, cp_model.FEASIBLE) or unsat_diagnostics:
+            elapsed_sec = round(time.perf_counter() - start_ts, 4)
             if not unsat_diagnostics:
                 unsat_diagnostics.append(
-                    "Sınav ve Gözetmen CP-SAT Çözülemezlik Tanısı: Sınav gün/oturum sayısı veya müsait Arş. Gör. "
-                    "sayısı 1-boş-koltuk salon bölünmesini karşılamak için yetersiz."
+                    "Sınav Takvimi CP-SAT Çözülemezlik Tanısı: Sınav gün/oturum sayısı veya 1-boş-koltuk "
+                    "salon kapasitesi öğrenci çakışmasızlığını karşılamak için yetersiz."
                 )
             return ExamScheduleOptimizationResponse(
                 academic_term=req.academic_term,
@@ -310,6 +276,122 @@ class ExamProctorAllocationEngine:
                 proctor_workloads=[],
             )
 
+        # Aşama A'dan seçilen aktif (ders, salon, gün, oturum) görevlerini çıkar
+        # active_duties: list of (duty_idx, course_obj, room_obj, day, session, w_scaled)
+        active_duties: list[tuple[int, Course, Room, int, int, int]] = []
+        chosen_slot_by_course: dict[int, tuple[int, int]] = {}
+        duty_seq = 0
+        for c in courses:
+            for d, s in all_time_slots:
+                ev = e_vars.get((c.id, d, s))
+                if ev is not None and solver_a.Value(ev) == 1:
+                    chosen_slot_by_course[c.id] = (d, s)
+                    is_heavy = (s == req.sessions_per_day) or (d in (6, 7))
+                    w_scaled = 3 if is_heavy else 2
+                    for r in rooms:
+                        yv = y_vars.get((c.id, r.id, d, s))
+                        if yv is not None and solver_a.Value(yv) == 1:
+                            active_duties.append((duty_seq, c, r, d, s, w_scaled))
+                            duty_seq += 1
+                    break
+
+        # ======================================================================
+        # AŞAMA B: Aktif Sınav Salonlarına Minimax (L_max - L_min) Gözetmen CP-SAT Çözücüsü
+        # ======================================================================
+        model_b = cp_model.CpModel()
+        z_duty_vars: dict[tuple[int, int], cp_model.IntVar] = {}  # (duty_idx, ta_id) -> BoolVar
+
+        for duty_idx, c_obj, r_obj, d, s, _ in active_duties:
+            duty_ta_vars = []
+            for ta in tas:
+                if (ta.id, d, s) in ta_blocked_set:
+                    continue
+                zv = model_b.NewBoolVar(f"z_duty{duty_idx}_ta{ta.id}")
+                z_duty_vars[(duty_idx, ta.id)] = zv
+                duty_ta_vars.append(zv)
+            # Her aktif sınav salonuna tam 1 müsait Arş. Gör. atanmalıdır
+            model_b.Add(sum(duty_ta_vars) == 1)
+
+        # Aynı (gün, oturum) içinde bir Arş. Gör. en fazla 1 sınav salonuna atanabilir
+        duties_by_slot: dict[tuple[int, int], list[int]] = defaultdict(list)
+        for duty_idx, _, _, d, s, _ in active_duties:
+            duties_by_slot[(d, s)].append(duty_idx)
+
+        for (d, s), slot_duty_ids in duties_by_slot.items():
+            if len(slot_duty_ids) <= 1:
+                continue
+            for ta in tas:
+                ta_vars_in_slot = [
+                    z_duty_vars[(d_idx, ta.id)]
+                    for d_idx in slot_duty_ids
+                    if (d_idx, ta.id) in z_duty_vars
+                ]
+                if len(ta_vars_in_slot) > 1:
+                    model_b.Add(sum(ta_vars_in_slot) <= 1)
+
+        max_possible_scaled_load = max(1, len(active_duties) * 3)
+        l_max = model_b.NewIntVar(0, max_possible_scaled_load, "L_max_scaled")
+        l_min = model_b.NewIntVar(0, max_possible_scaled_load, "L_min_scaled")
+
+        for ta in tas:
+            load_var = model_b.NewIntVar(0, max_possible_scaled_load, f"load_ta{ta.id}")
+            w_terms = [
+                w_sc * z_duty_vars[(duty_idx, ta.id)]
+                for duty_idx, _, _, _, _, w_sc in active_duties
+                if (duty_idx, ta.id) in z_duty_vars
+            ]
+            if w_terms:
+                model_b.Add(load_var == sum(w_terms))
+            else:
+                model_b.Add(load_var == 0)
+            model_b.Add(l_max >= load_var)
+            model_b.Add(l_min <= load_var)
+
+        # Minimax Adalet Kriteri: min (L_max - L_min)
+        model_b.Minimize(l_max - l_min)
+
+        solver_b = cp_model.CpSolver()
+        solver_b.parameters.max_time_in_seconds = max(2.0, float(req.max_time_seconds) * 0.4)
+        solver_b.parameters.num_search_workers = settings.cpsat_num_search_workers
+        status_b = solver_b.Solve(model_b)
+        elapsed_sec = round(time.perf_counter() - start_ts, 4)
+
+        if status_b not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return ExamScheduleOptimizationResponse(
+                academic_term=req.academic_term,
+                exam_type=req.exam_type,
+                solver_status="INFEASIBLE",
+                solve_time_seconds=elapsed_sec,
+                total_exams_scheduled=0,
+                total_room_allocations=0,
+                total_seated_students=0,
+                zero_student_clash_verified=False,
+                one_empty_seat_rule_verified=False,
+                min_ta_workload=0.0,
+                max_ta_workload=0.0,
+                workload_max_min_spread=0.0,
+                unsat_diagnostics_tr=[
+                    "Gözetmen Dağıtım Darboğazı: Eşzamanlı sınav salonu sayısı, o oturumda lisansüstü dersi "
+                    "olmayan müsait araştırma görevlisi sayısını aşıyor."
+                ],
+                exam_sessions=[],
+                proctor_workloads=[],
+            )
+
+        assigned_ta_by_course_room: dict[tuple[int, int], TeachingAssistant] = {}
+        chosen_rooms_by_course: dict[int, list[tuple[Room, TeachingAssistant]]] = defaultdict(list)
+        for duty_idx, c_obj, r_obj, _, _, _ in active_duties:
+            chosen_ta = tas[0]
+            for ta in tas:
+                zv = z_duty_vars.get((duty_idx, ta.id))
+                if zv is not None and solver_b.Value(zv) == 1:
+                    chosen_ta = ta
+                    break
+            assigned_ta_by_course_room[(c_obj.id, r_obj.id)] = chosen_ta
+            chosen_rooms_by_course[c_obj.id].append((r_obj, chosen_ta))
+
+        status = cp_model.OPTIMAL if (status_a == cp_model.OPTIMAL and status_b == cp_model.OPTIMAL) else cp_model.FEASIBLE
+
         # Eski sınav oturumlarını temizle
         self.db.query(ExamSession).filter(
             ExamSession.academic_term == req.academic_term,
@@ -324,11 +406,7 @@ class ExamProctorAllocationEngine:
         total_seated_students = 0
 
         for c in courses:
-            chosen_d, chosen_s = 1, 1
-            for d, s in all_time_slots:
-                if solver.Value(e_vars[(c.id, d, s)]) == 1:
-                    chosen_d, chosen_s = d, s
-                    break
+            chosen_d, chosen_s = chosen_slot_by_course[c.id]
 
             is_heavy = (chosen_s == req.sessions_per_day) or (chosen_d in (6, 7))
             duty_w = 1.5 if is_heavy else 1.0
@@ -345,17 +423,7 @@ class ExamProctorAllocationEngine:
             self.db.add(db_exam)
             self.db.flush()
 
-            # Bu sınava atanan amfileri ve gözetmenleri bul
-            chosen_rooms: list[tuple[Room, TeachingAssistant]] = []
-            for r in rooms:
-                if solver.Value(y_vars[(c.id, r.id, chosen_d, chosen_s)]) == 1:
-                    assigned_ta = tas[0]
-                    for ta in tas:
-                        zv = z_vars.get((ta.id, c.id, r.id, chosen_d, chosen_s))
-                        if zv is not None and solver.Value(zv) == 1:
-                            assigned_ta = ta
-                            break
-                    chosen_rooms.append((r, assigned_ta))
+            chosen_rooms = chosen_rooms_by_course[c.id]
 
             # Öğrencileri 1-Boş-Koltuk kapasitesine göre seçilen amfilere dağıt ve 2B koltuk koordinatlarını üret
             enrolled_st_ids = sorted(students_by_course.get(c.id, []))
@@ -493,8 +561,46 @@ class ExamProctorAllocationEngine:
             )
             .all()
         )
-        room_map = {r.id: r.code for r in self.db.query(Room).all()}
+        room_obj_map = {r.id: r for r in self.db.query(Room).all()}
+        room_map = {r_id: r.code for r_id, r in room_obj_map.items()}
         st_map = {s.id: s for s in self.db.query(Student).all()}
+        ta_map = {t.id: t for t in self.db.query(TeachingAssistant).all()}
+
+        # Bu sınava atanan salonların fiziksel boyutlarını ve gözetmenlerini çıkar
+        room_allocs = (
+            self.db.query(ExamRoomAllocation)
+            .filter(ExamRoomAllocation.exam_session_id == exam.id)
+            .order_by(ExamRoomAllocation.room_id.asc())
+            .all()
+        )
+        proctor_allocs = {
+            pa.room_id: ta_map.get(pa.ta_id)
+            for pa in self.db.query(ProctorAssignment)
+            .filter(ProctorAssignment.exam_session_id == exam.id)
+            .all()
+        }
+
+        visual_rooms: list[VisualRoomLayoutItem] = []
+        for ra in room_allocs:
+            r_obj = room_obj_map.get(ra.room_id)
+            if not r_obj:
+                continue
+            ta_obj = proctor_allocs.get(ra.room_id)
+            visual_rooms.append(
+                VisualRoomLayoutItem(
+                    room_id=r_obj.id,
+                    room_code=r_obj.code,
+                    room_name=r_obj.name,
+                    room_type=r_obj.room_type,
+                    seat_rows=r_obj.seat_rows,
+                    seat_cols=r_obj.seat_cols,
+                    normal_capacity=r_obj.normal_capacity,
+                    effective_exam_capacity=r_obj.effective_exam_capacity,
+                    allocated_student_count=ra.allocated_student_count,
+                    proctor_ta_code=ta_obj.code if ta_obj else "UNASSIGNED",
+                    proctor_ta_name=ta_obj.full_name if ta_obj else "Unassigned",
+                )
+            )
 
         # 1-Boş-Koltuk doğrulaması: Aynı oda ve aynı satırdaki ardışık iki öğrenci arasında |col_j - col_i| >= 2 olmalı
         cols_by_room_row: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -530,5 +636,6 @@ class ExamProctorAllocationEngine:
             session_index=exam.session_index,
             total_seated_students=len(seat_items),
             one_empty_seat_verified=spacing_ok,
+            rooms=visual_rooms,
             seats=seat_items,
         )

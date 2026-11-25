@@ -28,12 +28,15 @@ from app.models.academic import (
     CoursePrerequisite,
     Enrollment,
     Instructor,
+    InstructorAvailability,
     Room,
     Student,
+    TAUnavailability,
     TeachingAssistant,
     WeeklyScheduleAssignment,
 )
 from app.schemas.academic import (
+    CourseConstraintUpdateRequest,
     CourseRead,
     CurriculumGraphAnalysisResponse,
     ExamScheduleGenerateRequest,
@@ -41,17 +44,24 @@ from app.schemas.academic import (
     ExcelImportResultResponse,
     FailureSimulationRequest,
     FailureSimulationResponse,
+    InstructorAvailabilitySlotSchema,
+    InstructorAvailabilityUpdateRequest,
     InstructorRead,
     NonConflictMatrixResponse,
     PrerequisiteCreateRequest,
     PrerequisiteEdgeRead,
+    RoomCapacityUpdateRequest,
     RoomRead,
     RoomSeatingGridResponse,
     SystemDatasetSummary,
+    TAUnavailabilityCreateRequest,
+    TAUnavailabilityRead,
     TeachingAssistantRead,
     WeeklyScheduleGenerateRequest,
     WeeklyScheduleOptimizationResponse,
     WeeklySlotAssignmentRead,
+    WeeklySlotMoveRequest,
+    WeeklySlotMoveResponse,
 )
 from app.seed.atu_software_eng_seed import seed_atu_dataset
 
@@ -359,6 +369,30 @@ def list_weekly_schedule(
     return result
 
 
+@app.post(
+    "/api/v1/schedule/weekly/move",
+    response_model=WeeklySlotMoveResponse,
+    tags=["Module 2: Weekly Course Scheduling CSP"],
+)
+def move_and_validate_weekly_slot(
+    payload: WeeklySlotMoveRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Stretch Goal 1 — Manuel What-If Ders Taşıma ve Anlık Çakışma Doğrulayıcısı:
+    Bir ders oturumunu hedef gün, saat ve amfiye taşırken oda kapasitesi, LAB tipi,
+    hoca müsaitliği ve Modül 1 C_DAG çakışmazlık kurallarını anında denetler.
+    """
+    weekly_engine = WeeklyCourseSchedulingEngine(db)
+    try:
+        return weekly_engine.validate_and_move_slot(payload)
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": str(exc)},
+        ) from exc
+
+
 # ==============================================================================
 # MODÜL 3 — Exam, 1-Empty-Seat Grid & Equitable Proctor Allocation CSP Uç Noktaları
 # ==============================================================================
@@ -509,6 +543,262 @@ def import_excel_dataset(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"message": str(exc)},
         ) from exc
+
+
+# ==============================================================================
+# GELİŞTİRME 1 — İnteraktif Kaynak & Hoca / Arş. Gör. Müsaitlik Yönetimi Uç Noktaları
+# ==============================================================================
+
+@app.get(
+    "/api/v1/instructors/{instructor_id}/availabilities",
+    response_model=list[InstructorAvailabilitySlotSchema],
+    tags=["Resource & Availability Editor"],
+)
+def get_instructor_availabilities(
+    instructor_id: int,
+    db: Session = Depends(get_db),
+):
+    """Belirli bir öğretim elemanının 5x8 haftalık müsaitlik ve tercih cezası matrisini döndürür."""
+    inst = db.query(Instructor).filter(Instructor.id == instructor_id).first()
+    if not inst:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"Öğretim elemanı bulunamadı: ID={instructor_id}"},
+        )
+
+    rows = (
+        db.query(InstructorAvailability)
+        .filter(InstructorAvailability.instructor_id == instructor_id)
+        .order_by(InstructorAvailability.day_of_week.asc(), InstructorAvailability.slot_index.asc())
+        .all()
+    )
+    return [
+        InstructorAvailabilitySlotSchema(
+            day_of_week=r.day_of_week,
+            slot_index=r.slot_index,
+            is_available=r.is_available,
+            preference_penalty=r.preference_penalty,
+        )
+        for r in rows
+    ]
+
+
+@app.put(
+    "/api/v1/instructors/{instructor_id}/availabilities",
+    response_model=list[InstructorAvailabilitySlotSchema],
+    tags=["Resource & Availability Editor"],
+)
+def update_instructor_availabilities(
+    instructor_id: int,
+    payload: InstructorAvailabilityUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Öğretim elemanının haftalık 5x8 müsaitlik ve tercih hücrelerini günceller.
+    Modül 2 CP-SAT çözücüsü bir sonraki çalıştırmada doğrudan bu güncel matrisi kullanır.
+    """
+    inst = db.query(Instructor).filter(Instructor.id == instructor_id).first()
+    if not inst:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"Öğretim elemanı bulunamadı: ID={instructor_id}"},
+        )
+
+    existing_map = {
+        (r.day_of_week, r.slot_index): r
+        for r in db.query(InstructorAvailability)
+        .filter(InstructorAvailability.instructor_id == instructor_id)
+        .all()
+    }
+
+    for slot_item in payload.slots:
+        key = (slot_item.day_of_week, slot_item.slot_index)
+        if key in existing_map:
+            existing_map[key].is_available = slot_item.is_available
+            existing_map[key].preference_penalty = slot_item.preference_penalty
+        else:
+            db.add(
+                InstructorAvailability(
+                    instructor_id=instructor_id,
+                    day_of_week=slot_item.day_of_week,
+                    slot_index=slot_item.slot_index,
+                    is_available=slot_item.is_available,
+                    preference_penalty=slot_item.preference_penalty,
+                )
+            )
+
+    db.commit()
+    return get_instructor_availabilities(instructor_id=instructor_id, db=db)
+
+
+@app.put(
+    "/api/v1/courses/{course_id}/constraints",
+    response_model=CourseRead,
+    tags=["Resource & Availability Editor"],
+)
+def update_course_constraints(
+    course_id: int,
+    payload: CourseConstraintUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    """Bir dersin öğrenci sayısını, LAB odası zorunluluğunu, haftalık saatini veya hocasını günceller."""
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"Ders bulunamadı: ID={course_id}"},
+        )
+
+    course.enrolled_count = payload.enrolled_count
+    course.requires_lab_room = payload.requires_lab_room
+    course.theory_hours = payload.theory_hours
+    course.lab_hours = payload.lab_hours
+    if payload.instructor_id is not None:
+        course.instructor_id = payload.instructor_id
+
+    db.commit()
+    db.refresh(course)
+    return course
+
+
+@app.put(
+    "/api/v1/rooms/{room_id}/capacity",
+    response_model=RoomRead,
+    tags=["Resource & Availability Editor"],
+)
+def update_room_capacity_and_grid(
+    room_id: int,
+    payload: RoomCapacityUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Bir amfi veya laboratuvarın normal kapasitesini ve 2B (satır x sütun) koltuk
+    boyutlarını günceller; 1-boş-koltuk sınav kapasitesi otomatik yeniden hesaplanır.
+    """
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"Derslik/Amfi bulunamadı: ID={room_id}"},
+        )
+
+    room.room_type = payload.room_type
+    room.normal_capacity = payload.normal_capacity
+    room.seat_rows = payload.seat_rows
+    room.seat_cols = payload.seat_cols
+    db.commit()
+    db.refresh(room)
+
+    return RoomRead(
+        id=room.id,
+        code=room.code,
+        name=room.name,
+        room_type=room.room_type,
+        normal_capacity=room.normal_capacity,
+        seat_rows=room.seat_rows,
+        seat_cols=room.seat_cols,
+        effective_exam_capacity=room.effective_exam_capacity,
+    )
+
+
+@app.get(
+    "/api/v1/teaching-assistants/unavailabilities",
+    response_model=list[TAUnavailabilityRead],
+    tags=["Resource & Availability Editor"],
+)
+def list_ta_unavailabilities(db: Session = Depends(get_db)):
+    """Araştırma görevlilerinin sınav haftası lisansüstü ders / izin kısıtlarını listeler."""
+    rows = db.query(TAUnavailability).order_by(TAUnavailability.ta_id.asc(), TAUnavailability.exam_day.asc()).all()
+    ta_map = {t.id: t for t in db.query(TeachingAssistant).all()}
+    return [
+        TAUnavailabilityRead(
+            id=r.id,
+            ta_id=r.ta_id,
+            ta_code=ta_map[r.ta_id].code if r.ta_id in ta_map else f"TA-{r.ta_id}",
+            ta_name=ta_map[r.ta_id].full_name if r.ta_id in ta_map else "Unknown TA",
+            exam_day=r.exam_day,
+            session_index=r.session_index,
+            reason=r.reason,
+        )
+        for r in rows
+    ]
+
+
+@app.post(
+    "/api/v1/teaching-assistants/{ta_id}/unavailabilities",
+    response_model=TAUnavailabilityRead,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Resource & Availability Editor"],
+)
+def add_ta_unavailability(
+    ta_id: int,
+    payload: TAUnavailabilityCreateRequest,
+    db: Session = Depends(get_db),
+):
+    """Araştırma görevlisine yeni bir sınav günü/oturumu kısıtı (lisansüstü ders saati) ekler."""
+    ta = db.query(TeachingAssistant).filter(TeachingAssistant.id == ta_id).first()
+    if not ta:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"Araştırma görevlisi bulunamadı: ID={ta_id}"},
+        )
+
+    existing = (
+        db.query(TAUnavailability)
+        .filter(
+            TAUnavailability.ta_id == ta_id,
+            TAUnavailability.exam_day == payload.exam_day,
+            TAUnavailability.session_index == payload.session_index,
+        )
+        .first()
+    )
+    if existing:
+        existing.reason = payload.reason
+        db.commit()
+        db.refresh(existing)
+        rec = existing
+    else:
+        rec = TAUnavailability(
+            ta_id=ta_id,
+            exam_day=payload.exam_day,
+            session_index=payload.session_index,
+            reason=payload.reason,
+        )
+        db.add(rec)
+        db.commit()
+        db.refresh(rec)
+
+    return TAUnavailabilityRead(
+        id=rec.id,
+        ta_id=ta.id,
+        ta_code=ta.code,
+        ta_name=ta.full_name,
+        exam_day=rec.exam_day,
+        session_index=rec.session_index,
+        reason=rec.reason,
+    )
+
+
+@app.delete(
+    "/api/v1/teaching-assistants/unavailabilities/{unavailability_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["Resource & Availability Editor"],
+)
+def delete_ta_unavailability(
+    unavailability_id: int,
+    db: Session = Depends(get_db),
+):
+    """Araştırma görevlisinin sınav oturumu kısıtını kaldırır."""
+    rec = db.query(TAUnavailability).filter(TAUnavailability.id == unavailability_id).first()
+    if not rec:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"Kısıt kaydı bulunamadı: ID={unavailability_id}"},
+        )
+    db.delete(rec)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
 
 
 

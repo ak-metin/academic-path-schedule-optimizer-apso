@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/vite-env.d.ts","./src/pages/curriculumdagpage.tsx","./src/pages/examseatingpage.tsx","./src/pages/weeklyschedulepage.tsx"],"version":"5.6.3"}
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/vite-env.d.ts","./src/pages/curriculumdagpage.tsx","./src/pages/examseatingpage.tsx","./src/pages/resourcemanagementpage.tsx","./src/pages/weeklyschedulepage.tsx"],"version":"5.6.3"}

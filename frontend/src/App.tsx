@@ -3,8 +3,9 @@ import { API_BASE_URL, SystemDatasetSummary } from "./api";
 import { CurriculumDAGPage } from "./pages/CurriculumDAGPage";
 import { WeeklySchedulePage } from "./pages/WeeklySchedulePage";
 import { ExamSeatingPage } from "./pages/ExamSeatingPage";
+import { ResourceManagementPage } from "./pages/ResourceManagementPage";
 
-type TabType = "DAG" | "WEEKLY" | "EXAM";
+type TabType = "DAG" | "WEEKLY" | "EXAM" | "RESOURCES";
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>("DAG");
@@ -86,6 +87,17 @@ export const App: React.FC = () => {
           >
             Modül 3: Sınav, 1-Boş-Koltuk & Minimax Gözetmen CSP
           </button>
+
+          <button
+            onClick={() => setActiveTab("RESOURCES")}
+            className={`px-4 py-2 rounded-lg text-xs font-bold transition ${
+              activeTab === "RESOURCES"
+                ? "bg-amber-600 text-white shadow"
+                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+            }`}
+          >
+            Kaynak & Hoca Müsaitlik Yönetimi (CRUD)
+          </button>
         </div>
       </header>
 
@@ -94,6 +106,7 @@ export const App: React.FC = () => {
         {activeTab === "DAG" && <CurriculumDAGPage />}
         {activeTab === "WEEKLY" && <WeeklySchedulePage />}
         {activeTab === "EXAM" && <ExamSeatingPage />}
+        {activeTab === "RESOURCES" && <ResourceManagementPage />}
       </main>
 
       {/* Alt Bilgi */}

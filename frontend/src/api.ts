@@ -90,6 +90,9 @@ export interface WeeklyScheduleOptimizationResponse {
   solve_time_seconds: number;
   total_courses_scheduled: number;
   total_slot_assignments: number;
+  theory_slot_assignments: number;
+  lab_slot_assignments: number;
+  contiguous_blocks_verified: boolean;
   hard_constraints_satisfied: boolean;
   c_dag_pairs_enforced: number;
   total_student_idle_gap_hours: number;
@@ -97,6 +100,22 @@ export interface WeeklyScheduleOptimizationResponse {
   objective_value: number;
   unsat_diagnostics_tr: string[];
   assignments: WeeklySlotAssignmentRead[];
+}
+
+export interface PinnedSlotItem {
+  course_id: number;
+  room_id: number;
+  day_of_week: number;
+  slot_index: number;
+  session_type: string;
+}
+
+export interface WeeklySlotMoveResponse {
+  is_valid: boolean;
+  applied: boolean;
+  violations_tr: string[];
+  warnings_tr: string[];
+  updated_assignment: WeeklySlotAssignmentRead | null;
 }
 
 export interface ExamRoomProctorItem {
@@ -160,6 +179,20 @@ export interface SeatCellItem {
   seat_col: number;
 }
 
+export interface VisualRoomLayoutItem {
+  room_id: number;
+  room_code: string;
+  room_name: string;
+  room_type: string;
+  seat_rows: number;
+  seat_cols: number;
+  normal_capacity: number;
+  effective_exam_capacity: number;
+  allocated_student_count: number;
+  proctor_ta_code: string;
+  proctor_ta_name: string;
+}
+
 export interface RoomSeatingGridResponse {
   exam_session_id: number;
   course_code: string;
@@ -168,6 +201,7 @@ export interface RoomSeatingGridResponse {
   session_index: number;
   total_seated_students: number;
   one_empty_seat_verified: boolean;
+  rooms: VisualRoomLayoutItem[];
   seats: SeatCellItem[];
 }
 
@@ -187,4 +221,63 @@ export interface ExcelImportResultResponse {
   total_errors: number;
   row_errors: ExcelImportRowError[];
 }
+
+export interface InstructorRead {
+  id: number;
+  code: string;
+  full_name: string;
+  title: string;
+  department: string;
+  max_weekly_hours: number;
+}
+
+export interface InstructorAvailabilitySlotSchema {
+  day_of_week: number;
+  slot_index: number;
+  is_available: boolean;
+  preference_penalty: number;
+}
+
+export interface CourseRead {
+  id: number;
+  code: string;
+  name: string;
+  semester: number;
+  ects: number;
+  theory_hours: number;
+  lab_hours: number;
+  is_mandatory: boolean;
+  requires_lab_room: boolean;
+  enrolled_count: number;
+  instructor_id: number | null;
+}
+
+export interface RoomRead {
+  id: number;
+  code: string;
+  name: string;
+  room_type: string;
+  normal_capacity: number;
+  seat_rows: number;
+  seat_cols: number;
+  effective_exam_capacity: number;
+}
+
+export interface TeachingAssistantRead {
+  id: number;
+  code: string;
+  full_name: string;
+  current_workload_score: number;
+}
+
+export interface TAUnavailabilityRead {
+  id: number;
+  ta_id: number;
+  ta_code: string;
+  ta_name: string;
+  exam_day: number;
+  session_index: number;
+  reason: string;
+}
+
 
